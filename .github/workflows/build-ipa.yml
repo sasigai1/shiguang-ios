@@ -1,0 +1,28 @@
+name: Build Yingxia IPA
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen
+      - run: xcodegen generate
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild -project Yingxia.xcodeproj -scheme Yingxia -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build 2>&1 | tee build.log | grep -E "error:|warning: unre|BUILD" || true
+          test -d build/Build/Products/Release-iphoneos/Yingxia.app || { grep -E "error:" build.log | head -60; exit 1; }
+      - name: Package
+        run: |
+          mkdir -p Payload && cp -R build/Build/Products/Release-iphoneos/Yingxia.app Payload/
+          zip -qry Yingxia-unsigned.ipa Payload
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "yingxia-${{ github.run_number }}" Yingxia-unsigned.ipa --target "${{ github.sha }}" --title "影匣 Emby 客户端 ${{ github.run_number }}" --notes "未签名 IPA"
