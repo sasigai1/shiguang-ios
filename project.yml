@@ -1,0 +1,39 @@
+name: ShiguangDiary
+options:
+  bundleIdPrefix: com.tomjason
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  ShiguangDiary:
+    type: application
+    platform: iOS
+    sources:
+      - path: App/AppDelegate.swift
+      - path: App/Assets.xcassets
+      - path: App/www
+        type: folder
+        buildPhase: resources
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: 拾光日记
+        CFBundleShortVersionString: "2.1"
+        CFBundleVersion: "3"
+        UILaunchScreen: {}
+        UIStatusBarStyle: UIStatusBarStyleDarkContent
+        UIViewControllerBasedStatusBarAppearance: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        NSPhotoLibraryUsageDescription: 用于在日记中插入照片
+        NSCameraUsageDescription: 用于拍照插入日记
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tomjason.shiguang
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_VERSION: "5.0"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""
