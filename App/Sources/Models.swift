@@ -86,6 +86,8 @@ struct MediaSource: Decodable, Hashable, Identifiable {
     var defaultSubtitleStreamIndex: Int?
     var runTimeTicks: Int64?
     var transcodingUrl: String?
+    var transcodingSubProtocol: String?
+    var transcodeReasons: [String]?
     var directStreamUrl: String?
 
     var videoStream: MediaStream? { mediaStreams?.first { $0.type == "Video" } }
@@ -107,6 +109,7 @@ struct MediaSource: Decodable, Hashable, Identifiable {
 struct PlaybackInfo: Decodable {
     var mediaSources: [MediaSource]
     var playSessionId: String?
+    var errorCode: String?
 }
 
 struct BaseItem: Decodable, Hashable, Identifiable {

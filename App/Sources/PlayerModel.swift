@@ -127,11 +127,20 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
                 audioIndex = pickAudio(src)
                 subtitleIndex = pickSubtitle(src)
             }
+            var src2 = src
+            var errCode = info.errorCode
             let usedDefaults = keepSelections || (audioIndex == (src.defaultAudioStreamIndex ?? audioIndex) && subtitleIndex == src.defaultSubtitleStreamIndex)
-            candidates = buildCandidates(src, serverUrlOK: usedDefaults)
+            if !usedDefaults, let again = try? await client.playbackInfo(itemId, maxBitrate: bitrate, mediaSourceId: src.id, audio: audioIndex, subtitle: subtitleIndex),
+               let s2 = again.mediaSources.first(where: { $0.id == src.id }) ?? again.mediaSources.first {
+                src2 = s2
+                playSession = again.playSessionId ?? playSession
+                errCode = again.errorCode ?? errCode
+            }
+            candidates = buildCandidates(src2, serverUrlOK: true)
             attempts = []
+            diag = diagnostics(src2, errorCode: errCode)
             guard await playFirstWorking(at: seconds) else {
-                error = "播放失败，已尝试 \(attempts.count) 种方式：\n" + attempts.joined(separator: "\n") + "\n\n可在「视频」菜单换个码率，或检查服务器是否允许该用户转码/串流"
+                error = failureText()
                 isBuffering = false
                 return
             }
@@ -205,6 +214,15 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
         if !canDirect, ["mp4", "m4v", "mov"].contains(container), let u = client.directURL(item: item.id, source: src, session: playSession) {
             list.append(Candidate(url: u, method: "DirectPlay", name: "直接播放"))
         }
+        let br = bitrate > 0 ? bitrate : 40_000_000
+        if let u = client.url("/Videos/\(item.id)/stream.mp4", [
+            "MediaSourceId": src.id, "PlaySessionId": playSession, "DeviceId": EmbyClient.deviceId, "api_key": client.token,
+            "Container": "mp4", "VideoCodec": "h264", "AudioCodec": "aac", "MaxStreamingBitrate": String(br),
+            "VideoBitrate": String(br - 384_000), "AudioBitrate": "384000", "AudioStreamIndex": audioIndex.map { String($0) },
+            "SubtitleStreamIndex": burnSubtitle.map { String($0) }, "SubtitleMethod": burnSubtitle == nil ? nil : "Encode"
+        ]) {
+            list.append(Candidate(url: u, method: "Transcode", name: "MP4 转码流"))
+        }
         return list
     }
 
@@ -251,6 +269,7 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
             if isHLS {
                 let text = String(data: d, encoding: .utf8) ?? ""
                 if !text.contains("#EXTM3U") { return "返回的不是播放列表" }
+                if let problem = await checkHLS(text, base: (resp.url ?? url), depth: 0) { return problem }
             }
             return nil
         } catch {
@@ -258,12 +277,58 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
         }
     }
 
+    /// Walk master -> variant -> first segment so a server-side failure shows its real HTTP status.
+    func checkHLS(_ text: String, base: URL, depth: Int) async -> String? {
+        let lines = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let first = lines.first(where: { !$0.isEmpty && !$0.hasPrefix("#") }),
+              let next = URL(string: first, relativeTo: base)?.absoluteURL else {
+            return depth == 0 ? "播放列表为空" : nil
+        }
+        var r = URLRequest(url: next, timeoutInterval: 60)
+        r.setValue(client.token, forHTTPHeaderField: "X-Emby-Token")
+        let isList = next.path.lowercased().hasSuffix(".m3u8")
+        do {
+            let (d, resp) = try await EmbyClient.session.data(for: r)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let label = isList ? "子播放列表" : "首个分片"
+            guard (200..<300).contains(code) else {
+                let body = String(data: d.prefix(160), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return "\(label) HTTP \(code)" + (body.isEmpty ? "" : " \(body)")
+            }
+            if isList {
+                let t = String(data: d, encoding: .utf8) ?? ""
+                if !t.contains("#EXTM3U") { return "子播放列表无效" }
+                if depth < 2 { return await checkHLS(t, base: resp.url ?? next, depth: depth + 1) }
+            } else if d.count < 188 {
+                return "首个分片为空（服务器转码可能失败）"
+            }
+            return nil
+        } catch {
+            return (isList ? "子播放列表：" : "首个分片：") + error.localizedDescription
+        }
+    }
+
     /// AVPlayer itself failed on a URL that passed preflight: move on to the next candidate.
     func playerFailed(_ message: String) async {
         attempts.append("· \(currentCandidate)：\(message)")
         if await playFirstWorking(at: max(current, resumeAt)) { return }
-        error = "播放失败，已尝试 \(attempts.count) 种方式：\n" + attempts.joined(separator: "\n") + "\n\n可在「视频」菜单换个码率，或检查服务器是否允许该用户转码/串流"
+        error = failureText()
         isBuffering = false
+    }
+
+    private var diag = ""
+
+    func diagnostics(_ s: MediaSource, errorCode: String?) -> String {
+        var p: [String] = []
+        p.append("文件：\((s.container ?? "?").uppercased()) / 视频 \((s.videoStream?.codec ?? "?").uppercased()) / 音频 \((s.audioStreams.first { $0.index == audioIndex }?.codec ?? s.audioStreams.first?.codec ?? "?").uppercased())")
+        p.append("服务器：转码\(s.supportsTranscoding == true ? "允许" : "不允许") · 串流\(s.supportsDirectStream == true ? "允许" : "不允许") · 转码地址\(s.transcodingUrl == nil ? "无" : "有")")
+        if let r = s.transcodeReasons, !r.isEmpty { p.append("转码原因：" + r.joined(separator: ",")) }
+        if let e = errorCode { p.append("服务器错误：\(e)") }
+        return p.joined(separator: "\n")
+    }
+
+    func failureText() -> String {
+        "播放失败，已尝试 \(attempts.count) 种方式：\n" + attempts.joined(separator: "\n") + "\n\n" + diag + "\n\n请截图发给开发者"
     }
 
     func reopen(sourceId: String? = nil) {
