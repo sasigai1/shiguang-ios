@@ -2,6 +2,8 @@ name: Build unsigned IPA
 on:
   push:
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: macos-latest
@@ -26,3 +28,9 @@ jobs:
         with:
           name: ShiguangDiary-unsigned-ipa
           path: ShiguangDiary-unsigned.ipa
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=build-${{ github.run_number }}
+          gh release create "$TAG" ShiguangDiary-unsigned.ipa --title "拾光日记 iOS $TAG" --notes "未签名 IPA，请用自己的证书签名后安装"
