@@ -244,6 +244,19 @@ final class EmbyClient {
         ])
     }
 
+    /// Remux only (no re-encode): works when the user may direct-stream but not transcode.
+    func remuxURL(item: String, source: MediaSource, session: String?, audio: Int?, vcodec: String, acodec: String, hls: Bool) -> URL? {
+        url(hls ? "/Videos/\(item)/master.m3u8" : "/Videos/\(item)/stream.mp4", [
+            "MediaSourceId": source.id, "PlaySessionId": session, "DeviceId": Self.deviceId, "api_key": token,
+            "VideoCodec": vcodec, "AudioCodec": acodec, "Container": hls ? nil : "mp4",
+            "SegmentContainer": hls ? (vcodec == "h264" ? "ts" : "mp4") : nil,
+            "AllowVideoStreamCopy": "true", "AllowAudioStreamCopy": "true",
+            "MaxStreamingBitrate": String(max(source.bitrate ?? 0, 0) + 200_000_000),
+            "AudioStreamIndex": audio.map { String($0) },
+            "BreakOnNonKeyFrames": hls ? "true" : nil, "MinSegments": hls ? "1" : nil, "Static": hls ? nil : "false"
+        ])
+    }
+
     func subtitleURL(item: String, source: String, index: Int) -> URL? {
         url("/Videos/\(item)/\(source)/Subtitles/\(index)/Stream.srt", ["api_key": token])
     }

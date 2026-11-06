@@ -117,7 +117,7 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
         do {
             let info = try await client.playbackInfo(itemId, maxBitrate: bitrate, mediaSourceId: sourceId,
                                                      audio: keepSelections ? audioIndex : nil, subtitle: keepSelections ? subtitleIndex : nil)
-            playSession = info.playSessionId
+            playSession = info.playSessionId ?? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
             if !keepSelections || sources.isEmpty { sources = info.mediaSources }
             guard let src = info.mediaSources.first(where: { $0.id == sourceId }) ?? info.mediaSources.first else {
                 error = "没有可播放的媒体源"; return
@@ -201,6 +201,17 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
             && ["h264", "hevc", "h265", "avc"].contains(vcodec) && audioOK && audioCodecOK && burnSubtitle == nil
         if canDirect, let u = client.directURL(item: item.id, source: src, session: playSession) {
             list.append(Candidate(url: u, method: "DirectPlay", name: "直接播放"))
+        }
+        // Remux (container change only) when codecs are already iOS-friendly: needs only the direct-stream permission.
+        let vRemux = ["h264", "avc"].contains(vcodec) ? "h264" : (["hevc", "h265"].contains(vcodec) ? "hevc" : nil)
+        let aRemux = ["aac", "ac3", "eac3", "mp3", "alac", "flac"].contains(acodec) ? (acodec == "flac" || acodec == "alac" ? nil : acodec) : nil
+        if !canDirect, bitrate == 0, burnSubtitle == nil, src.supportsDirectStream != false, let v = vRemux, let a = aRemux {
+            if let u = client.remuxURL(item: item.id, source: src, session: playSession, audio: audioIndex, vcodec: v, acodec: a, hls: true) {
+                list.append(Candidate(url: u, method: "DirectStream", name: "HLS 封装（不转码）"))
+            }
+            if let u = client.remuxURL(item: item.id, source: src, session: playSession, audio: audioIndex, vcodec: v, acodec: a, hls: false) {
+                list.append(Candidate(url: u, method: "DirectStream", name: "MP4 封装（不转码）"))
+            }
         }
         if hevc, let u = client.hlsURL(item: item.id, source: src, session: playSession, maxBitrate: bitrate, audio: audioIndex, burnSubtitle: burnSubtitle, hevc: true) {
             list.append(Candidate(url: u, method: bitrate == 0 ? "DirectStream" : "Transcode", name: "HLS (HEVC)"))
