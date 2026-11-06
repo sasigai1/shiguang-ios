@@ -127,16 +127,14 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
                 audioIndex = pickAudio(src)
                 subtitleIndex = pickSubtitle(src)
             }
-            guard let url = streamURL(src) else { error = "无法生成播放地址"; return }
-            let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": ["X-Emby-Token": client.token ?? ""]])
-            let pi = AVPlayerItem(asset: asset)
-            pi.preferredForwardBufferDuration = 15
-            observe(pi)
-            player.replaceCurrentItem(with: pi)
-            if seconds > 1 { await player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) }
-            player.defaultRate = speed
-            player.play()
-            player.rate = speed
+            let usedDefaults = keepSelections || (audioIndex == (src.defaultAudioStreamIndex ?? audioIndex) && subtitleIndex == src.defaultSubtitleStreamIndex)
+            candidates = buildCandidates(src, serverUrlOK: usedDefaults)
+            attempts = []
+            guard await playFirstWorking(at: seconds) else {
+                error = "播放失败，已尝试 \(attempts.count) 种方式：\n" + attempts.joined(separator: "\n") + "\n\n可在「视频」菜单换个码率，或检查服务器是否允许该用户转码/串流"
+                isBuffering = false
+                return
+            }
             await loadSubtitles()
             updateNowPlaying()
             await client.reportStart(item: item.id, source: src.id, session: playSession, ticks: Int64(seconds * 10_000_000),
@@ -177,7 +175,13 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
         return s.index
     }
 
-    func streamURL(_ src: MediaSource) -> URL? {
+    struct Candidate { let url: URL; let method: String; let name: String }
+    private var candidates: [Candidate] = []
+    private var attempts: [String] = []
+    private var resumeAt: Double = 0
+
+    func buildCandidates(_ src: MediaSource, serverUrlOK: Bool) -> [Candidate] {
+        var list: [Candidate] = []
         let container = (src.container ?? "").lowercased()
         let vcodec = (src.videoStream?.codec ?? "").lowercased()
         let defaultAudio = src.defaultAudioStreamIndex ?? src.audioStreams.first?.index
@@ -186,12 +190,80 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
         let audioCodecOK = ["aac", "ac3", "eac3", "mp3", "alac", "flac"].contains(acodec)
         let canDirect = settings.preferDirect && bitrate == 0 && ["mp4", "m4v", "mov"].contains(container)
             && ["h264", "hevc", "h265", "avc"].contains(vcodec) && audioOK && audioCodecOK && burnSubtitle == nil
-        if canDirect {
-            playMethod = "DirectPlay"
-            return client.directURL(item: item.id, source: src, session: playSession)
+        if canDirect, let u = client.directURL(item: item.id, source: src, session: playSession) {
+            list.append(Candidate(url: u, method: "DirectPlay", name: "直接播放"))
         }
-        playMethod = bitrate == 0 && burnSubtitle == nil ? "DirectStream" : "Transcode"
-        return client.hlsURL(item: item.id, source: src, session: playSession, maxBitrate: bitrate, audio: audioIndex, burnSubtitle: burnSubtitle, hevc: hevc)
+        if hevc, let u = client.hlsURL(item: item.id, source: src, session: playSession, maxBitrate: bitrate, audio: audioIndex, burnSubtitle: burnSubtitle, hevc: true) {
+            list.append(Candidate(url: u, method: bitrate == 0 ? "DirectStream" : "Transcode", name: "HLS (HEVC)"))
+        }
+        if serverUrlOK, let t = src.transcodingUrl, let u = client.absolute(t) {
+            list.append(Candidate(url: u, method: "Transcode", name: "服务器转码地址"))
+        }
+        if let u = client.hlsURL(item: item.id, source: src, session: playSession, maxBitrate: bitrate, audio: audioIndex, burnSubtitle: burnSubtitle, hevc: false) {
+            list.append(Candidate(url: u, method: bitrate == 0 && burnSubtitle == nil ? "DirectStream" : "Transcode", name: "HLS (H.264)"))
+        }
+        if !canDirect, ["mp4", "m4v", "mov"].contains(container), let u = client.directURL(item: item.id, source: src, session: playSession) {
+            list.append(Candidate(url: u, method: "DirectPlay", name: "直接播放"))
+        }
+        return list
+    }
+
+    /// Preflight each candidate over HTTP, then hand the first good one to AVPlayer.
+    func playFirstWorking(at seconds: Double) async -> Bool {
+        resumeAt = seconds
+        while !candidates.isEmpty {
+            let c = candidates.removeFirst()
+            let check = await preflight(c.url)
+            if let problem = check {
+                attempts.append("· \(c.name)：\(problem)")
+                continue
+            }
+            playMethod = c.method
+            let asset = AVURLAsset(url: c.url, options: ["AVURLAssetHTTPHeaderFieldsKey": ["X-Emby-Token": client.token ?? ""]])
+            let pi = AVPlayerItem(asset: asset)
+            pi.preferredForwardBufferDuration = 15
+            currentCandidate = c.name
+            observe(pi)
+            player.replaceCurrentItem(with: pi)
+            if seconds > 1 { await player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) }
+            player.defaultRate = speed
+            player.play()
+            player.rate = speed
+            return true
+        }
+        return false
+    }
+    private var currentCandidate = ""
+
+    func preflight(_ url: URL) async -> String? {
+        var r = URLRequest(url: url, timeoutInterval: 30)
+        r.setValue(client.token, forHTTPHeaderField: "X-Emby-Token")
+        r.setValue(client.authHeader, forHTTPHeaderField: "X-Emby-Authorization")
+        let isHLS = url.path.lowercased().hasSuffix(".m3u8")
+        if !isHLS { r.setValue("bytes=0-1", forHTTPHeaderField: "Range") }
+        do {
+            let (d, resp) = try await EmbyClient.session.data(for: r)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            guard (200..<300).contains(code) else {
+                let body = String(data: d.prefix(160), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return "HTTP \(code)" + (body.isEmpty ? "" : " \(body)")
+            }
+            if isHLS {
+                let text = String(data: d, encoding: .utf8) ?? ""
+                if !text.contains("#EXTM3U") { return "返回的不是播放列表" }
+            }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// AVPlayer itself failed on a URL that passed preflight: move on to the next candidate.
+    func playerFailed(_ message: String) async {
+        attempts.append("· \(currentCandidate)：\(message)")
+        if await playFirstWorking(at: max(current, resumeAt)) { return }
+        error = "播放失败，已尝试 \(attempts.count) 种方式：\n" + attempts.joined(separator: "\n") + "\n\n可在「视频」菜单换个码率，或检查服务器是否允许该用户转码/串流"
+        isBuffering = false
     }
 
     func reopen(sourceId: String? = nil) {
@@ -251,7 +323,11 @@ final class PlayerModel: NSObject, ObservableObject, AVPictureInPictureControlle
     func observe(_ pi: AVPlayerItem) {
         statusObs = pi.observe(\.status, options: [.new]) { [weak self] i, _ in
             Task { @MainActor in
-                if i.status == .failed { self?.error = "播放失败：\(i.error?.localizedDescription ?? "未知错误")\n可尝试在「视频」菜单降低画质或切换编码" }
+                if i.status == .failed {
+                    let ns = i.error as NSError?
+                    let under = (ns?.userInfo[NSUnderlyingErrorKey] as? NSError).map { " (\($0.domain) \($0.code))" } ?? ""
+                    await self?.playerFailed((i.error?.localizedDescription ?? "未知错误") + under)
+                }
             }
         }
         bufferObs = pi.observe(\.loadedTimeRanges, options: [.new]) { [weak self] i, _ in

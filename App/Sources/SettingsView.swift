@@ -95,7 +95,7 @@ struct SettingsView: View {
             }
 
             Section {
-                HStack { Text("版本"); Spacer(); Text("影匣 1.0").foregroundStyle(Theme.secondary) }
+                HStack { Text("版本"); Spacer(); Text("影匣 1.1").foregroundStyle(Theme.secondary) }
             } footer: {
                 Text("影匣 · 为 Emby 打造的 iOS 客户端").frame(maxWidth: .infinity).padding(.top, 10)
             }

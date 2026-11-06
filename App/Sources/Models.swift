@@ -85,6 +85,8 @@ struct MediaSource: Decodable, Hashable, Identifiable {
     var defaultAudioStreamIndex: Int?
     var defaultSubtitleStreamIndex: Int?
     var runTimeTicks: Int64?
+    var transcodingUrl: String?
+    var directStreamUrl: String?
 
     var videoStream: MediaStream? { mediaStreams?.first { $0.type == "Video" } }
     var audioStreams: [MediaStream] { mediaStreams?.filter { $0.type == "Audio" } ?? [] }

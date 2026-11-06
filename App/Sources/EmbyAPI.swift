@@ -66,6 +66,13 @@ final class EmbyClient {
         return c.url
     }
 
+    func absolute(_ path: String) -> URL? {
+        if path.lowercased().hasPrefix("http") { return URL(string: path) }
+        var p = path.hasPrefix("/") ? path : "/" + path
+        if !p.lowercased().contains("api_key="), let t = token { p += (p.contains("?") ? "&" : "?") + "api_key=" + t }
+        return URL(string: base + p)
+    }
+
     func request(_ method: String, _ path: String, _ q: [String: String?] = [:], body: Any? = nil) async throws -> Data {
         guard let u = url(path, q) else { throw APIError.badURL }
         var r = URLRequest(url: u)
